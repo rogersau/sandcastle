@@ -76,6 +76,11 @@ Sandcastle uses a `SandboxProvider` to create isolated environments. The `sandbo
 
 Worktree methods (`wt.run()`, `wt.interactive()`, `wt.createSandbox()`) accept the same providers as their top-level counterparts. `wt.interactive()` defaults to `noSandbox()` when no sandbox is specified.
 
+An optional Azure Container Instances provider is available at
+`@ai-hero/sandcastle/sandboxes/azure-container`. It is an isolated provider and
+must be configured explicitly in each repository; `sandcastle init` does not
+select it automatically.
+
 ```typescript
 import { docker } from "@ai-hero/sandcastle/sandboxes/docker";
 import { podman } from "@ai-hero/sandcastle/sandboxes/podman";
@@ -100,6 +105,51 @@ await interactive({
 ```
 
 You can also [create your own provider](#custom-sandbox-providers) using `createBindMountSandboxProvider` or `createIsolatedSandboxProvider`.
+
+### Azure Container Instances
+
+Install the optional peer dependencies in a repository that uses the provider:
+
+```bash
+npm install @azure/arm-containerinstance @azure/identity ws
+```
+
+`azureContainer()` authenticates with `DefaultAzureCredential`, so `az login`,
+managed identity, workload identity, and service-principal environment
+variables are supported. The image must contain `git`, `sh`, `base64`, and
+`tar`, and must remain running until Sandcastle closes the container group. The
+default keep-alive command has a two-hour safety lifetime; configure
+`maxLifetimeSeconds` for longer tasks or provide your own command.
+
+```typescript
+import { run, claudeCode } from "@ai-hero/sandcastle";
+import { azureContainer } from "@ai-hero/sandcastle/sandboxes/azure-container";
+
+await run({
+  agent: claudeCode("claude-opus-4-8"),
+  sandbox: azureContainer({
+    subscriptionId: process.env.AZURE_SUBSCRIPTION_ID,
+    resourceGroup: process.env.AZURE_RESOURCE_GROUP,
+    location: "australiaeast",
+    image: "myregistry.azurecr.io/sandcastle-agent:latest",
+    registry: {
+      server: "myregistry.azurecr.io",
+      identity: process.env.AZURE_ACR_IDENTITY,
+    },
+  }),
+  prompt:
+    "Fix the oldest issue labelled ready-for-agent and commit the changes.",
+});
+```
+
+The provider transfers the repository with Sandcastle's isolated sync protocol
+and deletes the temporary Azure container group when the run finishes. ACI
+charges for requested CPU and memory only while the container group is running;
+the provider uses a `Never` restart policy and a default two-hour safety cap so
+an abandoned group terminates instead of running forever. Set
+`AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_LOCATION`, and
+`AZURE_CONTAINER_IMAGE` in the environment instead of passing those values in
+code when that is more convenient.
 
 ## API
 

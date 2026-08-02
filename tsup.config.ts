@@ -13,6 +13,7 @@ export default defineConfig({
     "sandboxes/podman": "src/sandboxes/podman.ts",
     "sandboxes/vercel": "src/sandboxes/vercel.ts",
     "sandboxes/daytona": "src/sandboxes/daytona.ts",
+    "sandboxes/azure-container": "src/sandboxes/azure-container.ts",
     "sandboxes/no-sandbox": "src/sandboxes/no-sandbox.ts",
   },
   format: ["esm"],
@@ -24,7 +25,13 @@ export default defineConfig({
   clean: true,
   dts: true,
   treeshake: true,
-  external: ["@vercel/sandbox", "@daytona/sdk"],
+  external: [
+    "@vercel/sandbox",
+    "@daytona/sdk",
+    "@azure/arm-containerinstance",
+    "@azure/identity",
+    "ws",
+  ],
   define: {
     __SANDCASTLE_VERSION__: JSON.stringify(pkg.version),
   },
