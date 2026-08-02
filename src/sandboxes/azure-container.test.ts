@@ -39,11 +39,21 @@ const azureMocks = vi.hoisted(() => {
     send(data: string, callback?: (error?: Error) => void): void {
       callback?.();
       if (data === "password") {
-        queueMicrotask(() => {
-          this.emit("message", `hello\n__SANDCASTLE_EXIT_CODE__0\n`);
-          this.emit("close");
-        });
+        return;
       }
+      if (data.includes("__SANDCASTLE_SHELL_READY__")) {
+        queueMicrotask(() =>
+          this.emit("message", "\n__SANDCASTLE_SHELL_READY__\n"),
+        );
+        return;
+      }
+      queueMicrotask(() => {
+        this.emit(
+          "message",
+          `\n__SANDCASTLE_OUTPUT_START__\nhello\n__SANDCASTLE_EXIT_CODE__0\n`,
+        );
+        this.emit("close");
+      });
     }
 
     close(): void {
@@ -132,6 +142,7 @@ describe("azureContainer()", () => {
     const result = await handle.exec("printf hello", {
       onLine: (line) => lines.push(line),
     });
+    const bufferedResult = await handle.exec("printf hello");
 
     expect(azureMocks.createOrUpdate).toHaveBeenCalledOnce();
     expect(azureMocks.createOrUpdate.mock.calls[0]?.[2]).toMatchObject({
@@ -148,9 +159,13 @@ describe("azureContainer()", () => {
         },
       ],
     });
-    expect(azureMocks.executeCommand).toHaveBeenCalledOnce();
+    expect(azureMocks.executeCommand).toHaveBeenCalledTimes(2);
+    expect(azureMocks.executeCommand.mock.calls[0]?.[3]).toMatchObject({
+      command: "/bin/sh",
+    });
     expect(lines).toEqual(["hello"]);
     expect(result).toMatchObject({ stdout: "hello", exitCode: 0 });
+    expect(bufferedResult.stdout).toContain("hello");
 
     await handle.close();
     expect(azureMocks.deleteGroup).toHaveBeenCalledOnce();

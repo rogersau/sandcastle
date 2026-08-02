@@ -4,5 +4,6 @@
 
 Add an optional Azure Container Instances isolated sandbox provider at `sandboxes/azure-container`.
 
-The provider configures ACI exec sessions for reliable large-input streaming
-and reports premature WebSocket termination instead of treating it as success.
+The provider configures interactive ACI exec sessions for reliable large-input
+streaming and reports premature WebSocket termination instead of treating it as
+success.

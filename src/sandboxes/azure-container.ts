@@ -25,8 +25,14 @@ const DEFAULT_STARTUP_TIMEOUT_MS = 120_000;
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_TERMINAL_SIZE = { rows: 200, cols: 240 };
 const DEFAULT_MAX_LIFETIME_SECONDS = 2 * 60 * 60;
+const SHELL_READY_MARKER = "__SANDCASTLE_SHELL_READY__";
+const SHELL_READY_SEQUENCE = `\n${SHELL_READY_MARKER}\n`;
+const OUTPUT_START_MARKER = "__SANDCASTLE_OUTPUT_START__";
+const OUTPUT_START_SEQUENCE = `\n${OUTPUT_START_MARKER}\n`;
 const EXIT_MARKER = "__SANDCASTLE_EXIT_CODE__";
+const EXIT_CODE_PATTERN = new RegExp(`\\n${EXIT_MARKER}(\\d+)\\n`);
 const INPUT_CHUNK_SIZE = 8 * 1024;
+const CANONICAL_INPUT_CHUNK_SIZE = 2 * 1024;
 
 /** Credentials or managed identity used to pull a private image. */
 export interface AzureContainerRegistryOptions {
@@ -173,7 +179,7 @@ const sendSocketText = (
     }
   });
 
-const sendSocketInput = async (
+const sendSocketChunks = async (
   socket: { send(data: string, callback?: (error?: Error) => void): void },
   input: string,
 ): Promise<void> => {
@@ -182,6 +188,18 @@ const sendSocketInput = async (
       socket,
       input.slice(offset, offset + INPUT_CHUNK_SIZE),
     );
+  }
+};
+
+const sendSocketInput = async (
+  socket: { send(data: string, callback?: (error?: Error) => void): void },
+  input: string,
+  lineBreaks: boolean,
+): Promise<void> => {
+  const chunkSize = lineBreaks ? CANONICAL_INPUT_CHUNK_SIZE : INPUT_CHUNK_SIZE;
+  for (let offset = 0; offset < input.length; offset += chunkSize) {
+    const chunk = input.slice(offset, offset + chunkSize);
+    await sendSocketText(socket, lineBreaks ? `${chunk}\n` : chunk);
   }
 
   // ACI exposes a terminal rather than a half-close operation. Ctrl-D is the
@@ -192,13 +210,20 @@ const sendSocketInput = async (
 const extractExitCode = (
   output: string,
 ): { readonly stdout: string; readonly exitCode: number } => {
-  const match = output.match(new RegExp(`${EXIT_MARKER}(\\d+)`));
+  const normalized = output.replace(/\r\n/g, "\n");
+  const outputStartIndex = normalized.indexOf(OUTPUT_START_SEQUENCE);
+  if (outputStartIndex < 0) {
+    return { stdout: output, exitCode: 0 };
+  }
+
+  const payloadStart = outputStartIndex + OUTPUT_START_SEQUENCE.length;
+  const match = normalized.slice(payloadStart).match(EXIT_CODE_PATTERN);
   if (!match || match.index === undefined) {
     return { stdout: output, exitCode: 0 };
   }
 
   return {
-    stdout: output.slice(0, match.index),
+    stdout: normalized.slice(payloadStart, payloadStart + match.index),
     exitCode: Number(match[1]),
   };
 };
@@ -207,21 +232,29 @@ const buildRemoteCommand = (
   command: string,
   cwd: string,
   sudo: boolean,
+  hasStdin: boolean,
 ): string => {
   const effectiveCommand = sudo ? `sudo ${command}` : command;
   const body = [
-    // ACI exec sessions are backed by a PTY. Disable canonical input and
-    // input echo so large base64 streams do not overflow the line buffer or
-    // get copied back into the WebSocket output stream.
-    "stty -icanon -echo 2>/dev/null || true",
+    ...(hasStdin ? ["stty icanon -echo"] : []),
+    `printf '\\n${OUTPUT_START_MARKER}\\n'`,
     `cd ${shellQuote(cwd)}`,
     "code=$?",
     `if [ "$code" -eq 0 ]; then ${effectiveCommand}; code=$?; fi`,
     `printf '\\n${EXIT_MARKER}%s\\n' "$code"`,
     'exit "$code"',
-  ].join("; ");
-  return `sh -c ${shellQuote(body)}`;
+  ].join("\n");
+  return body;
 };
+
+const buildShellBootstrap = (): string =>
+  [
+    // ACI exec sessions are backed by a PTY. Disable canonical input and
+    // input echo before sending any large command input.
+    "stty -icanon -echo 2>/dev/null || true",
+    "PS1=",
+    `printf '\\n${SHELL_READY_MARKER}\\n'`,
+  ].join("\n");
 
 const waitForRunning = async (
   client: {
@@ -401,18 +434,23 @@ export const azureContainer = (
           cwd?: string;
           sudo?: boolean;
           stdin?: string;
+          stdinLineBreaks?: boolean;
         },
       ): Promise<ExecResult> => {
+        const remoteScript = buildRemoteCommand(
+          command,
+          opts?.cwd ?? DEFAULT_WORKTREE_PATH,
+          opts?.sudo ?? false,
+          opts?.stdin !== undefined,
+        );
         const response = await client.containers.executeCommand(
           resourceGroup,
           groupName,
           containerName,
           {
-            command: buildRemoteCommand(
-              command,
-              opts?.cwd ?? DEFAULT_WORKTREE_PATH,
-              opts?.sudo ?? false,
-            ),
+            // ACI's exec API starts a single process; shell commands and
+            // arguments are entered through the interactive WebSocket.
+            command: "/bin/sh",
             terminalSize,
           },
         );
@@ -433,8 +471,18 @@ export const azureContainer = (
         const rawOutput = await new Promise<string>((resolve, reject) => {
           const chunks: string[] = [];
           let pending = "";
+          let readyPending = "";
+          let shellReady = false;
+          let outputStarted = false;
           let markerSeen = false;
           let settled = false;
+          let resolveShellReady!: () => void;
+          let rejectShellReady!: (error: Error) => void;
+          const shellReadyPromise = new Promise<void>((ready, failed) => {
+            resolveShellReady = ready;
+            rejectShellReady = failed;
+          });
+          void shellReadyPromise.catch(() => undefined);
 
           const emitLine = (line: string): void => {
             const normalized = line.replace(/\r$/, "");
@@ -442,20 +490,56 @@ export const azureContainer = (
             opts?.onLine?.(normalized);
           };
 
-          const processForStreaming = (text: string): void => {
-            if (!opts?.onLine || markerSeen) return;
+          const processShellReady = (text: string): void => {
+            if (shellReady) return;
+            readyPending += text.replace(/\r\n/g, "\n");
+            if (readyPending.includes(SHELL_READY_SEQUENCE)) {
+              shellReady = true;
+              resolveShellReady();
+              return;
+            }
+            readyPending = readyPending.slice(
+              -(SHELL_READY_SEQUENCE.length - 1),
+            );
+          };
+
+          const processOutput = (text: string): void => {
+            if (markerSeen) return;
             pending += text.replace(/\r\n/g, "\n");
-            const markerIndex = pending.indexOf(EXIT_MARKER);
-            if (markerIndex >= 0) {
-              const beforeMarker = pending.slice(0, markerIndex);
-              const lines = beforeMarker.split("\n");
-              const last = lines.pop();
-              for (const line of lines) emitLine(line);
-              if (last) emitLine(last);
+
+            if (!outputStarted) {
+              const outputStartIndex = pending.indexOf(OUTPUT_START_SEQUENCE);
+              if (outputStartIndex < 0) {
+                pending = pending.slice(-(OUTPUT_START_SEQUENCE.length - 1));
+                return;
+              }
+              pending = pending.slice(
+                outputStartIndex + OUTPUT_START_SEQUENCE.length,
+              );
+              outputStarted = true;
+            }
+
+            const exitMatch = pending.match(EXIT_CODE_PATTERN);
+            if (exitMatch?.index !== undefined) {
+              if (opts?.onLine) {
+                const payload = pending.slice(0, exitMatch.index);
+                const lines = payload.split("\n");
+                const last = lines.pop();
+                for (const line of lines) emitLine(line);
+                if (last) emitLine(last);
+              }
               pending = "";
               markerSeen = true;
               return;
             }
+
+            if (!opts?.onLine) {
+              // Keep only enough data to recognize a marker split across
+              // WebSocket frames; the complete output remains in chunks.
+              pending = pending.slice(-(EXIT_MARKER.length + 32));
+              return;
+            }
+
             const lines = pending.split("\n");
             pending = lines.pop() ?? "";
             for (const line of lines) emitLine(line);
@@ -464,11 +548,13 @@ export const azureContainer = (
           const finish = (error?: Error): void => {
             if (settled) return;
             settled = true;
-            if (!markerSeen && opts?.onLine && pending) {
-              const markerIndex = pending.indexOf(EXIT_MARKER);
-              const finalOutput =
-                markerIndex >= 0 ? pending.slice(0, markerIndex) : pending;
-              if (finalOutput) emitLine(finalOutput);
+            if (!shellReady) {
+              rejectShellReady(
+                error ??
+                  new Error(
+                    `Azure exec WebSocket closed before shell startup for command '${command}'.`,
+                  ),
+              );
             }
             if (error) socket.close();
             if (error) reject(error);
@@ -479,8 +565,15 @@ export const azureContainer = (
             void (async () => {
               try {
                 await sendSocketText(socket, password);
+                await sendSocketChunks(socket, `${buildShellBootstrap()}\n`);
+                await shellReadyPromise;
+                await sendSocketChunks(socket, `${remoteScript}\n`);
                 if (opts?.stdin !== undefined) {
-                  await sendSocketInput(socket, opts.stdin);
+                  await sendSocketInput(
+                    socket,
+                    opts.stdin,
+                    opts.stdinLineBreaks ?? false,
+                  );
                 }
               } catch (error) {
                 finish(
@@ -492,7 +585,8 @@ export const azureContainer = (
           socket.on("message", (data: unknown) => {
             const text = toText(data);
             chunks.push(text);
-            processForStreaming(text);
+            processShellReady(text);
+            processOutput(text);
           });
           socket.once("error", (error: Error) => finish(error));
           socket.once("close", () => {
@@ -532,7 +626,10 @@ export const azureContainer = (
             const archive = await createTarGz(hostPath);
             const result = await exec(
               `mkdir -p ${shellQuote(sandboxPath)} && base64 --decode | tar --extract --gzip --directory ${shellQuote(sandboxPath)}`,
-              { stdin: archive.toString("base64") },
+              {
+                stdin: archive.toString("base64"),
+                stdinLineBreaks: true,
+              },
             );
             if (result.exitCode !== 0) {
               throw new Error(
@@ -545,7 +642,7 @@ export const azureContainer = (
           const content = (await readFile(hostPath)).toString("base64");
           const result = await exec(
             `mkdir -p ${shellQuote(dirname(sandboxPath))} && base64 --decode > ${shellQuote(sandboxPath)}`,
-            { stdin: content },
+            { stdin: content, stdinLineBreaks: true },
           );
           if (result.exitCode !== 0) {
             throw new Error(
