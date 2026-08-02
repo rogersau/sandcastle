@@ -26,7 +26,7 @@ const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const DEFAULT_TERMINAL_SIZE = { rows: 200, cols: 240 };
 const DEFAULT_MAX_LIFETIME_SECONDS = 2 * 60 * 60;
 const EXIT_MARKER = "__SANDCASTLE_EXIT_CODE__";
-const INPUT_CHUNK_SIZE = 32 * 1024;
+const INPUT_CHUNK_SIZE = 8 * 1024;
 
 /** Credentials or managed identity used to pull a private image. */
 export interface AzureContainerRegistryOptions {
@@ -210,6 +210,10 @@ const buildRemoteCommand = (
 ): string => {
   const effectiveCommand = sudo ? `sudo ${command}` : command;
   const body = [
+    // ACI exec sessions are backed by a PTY. Disable canonical input and
+    // input echo so large base64 streams do not overflow the line buffer or
+    // get copied back into the WebSocket output stream.
+    "stty -icanon -echo 2>/dev/null || true",
     `cd ${shellQuote(cwd)}`,
     "code=$?",
     `if [ "$code" -eq 0 ]; then ${effectiveCommand}; code=$?; fi`,
@@ -491,7 +495,17 @@ export const azureContainer = (
             processForStreaming(text);
           });
           socket.once("error", (error: Error) => finish(error));
-          socket.once("close", () => finish());
+          socket.once("close", () => {
+            if (markerSeen) {
+              finish();
+            } else {
+              finish(
+                new Error(
+                  `Azure exec WebSocket closed before command '${command}' completed.`,
+                ),
+              );
+            }
+          });
         });
 
         const result = extractExitCode(rawOutput);
