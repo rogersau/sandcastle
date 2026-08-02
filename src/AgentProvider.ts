@@ -748,7 +748,7 @@ const parseCodexStreamLine = (line: string): ParsedStreamEvent[] => {
 
 /** Options for the codex agent provider. */
 export interface CodexOptions {
-  readonly effort?: "low" | "medium" | "high" | "xhigh";
+  readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
   /** Environment variables injected by this agent provider. */
   readonly env?: Record<string, string>;
   /** When false, session capture is disabled. Default: true. */
@@ -806,7 +806,10 @@ export const codex = (
     } else {
       base = "codex exec";
     }
-    const stdinArg = resumeSession ? " -" : "";
+    // Codex requires `-` to be explicit when the fresh-session prompt is
+    // supplied on stdin; without it, `codex exec` reports "No prompt
+    // provided" even though stdin contains the prompt.
+    const stdinArg = " -";
     return {
       command: `${base} --json${approvalsFlags} -m ${shellEscape(model)}${effortFlag}${stdinArg}`,
       stdin: prompt,

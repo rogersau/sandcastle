@@ -150,6 +150,46 @@ describe("startSandbox", () => {
       await handle.close();
     });
 
+    it("closes the provider when initial sync fails", async () => {
+      const hostDir = await mkdtemp(join(tmpdir(), "sandcastle-test-"));
+      tempDirs.push(hostDir);
+      await initRepo(hostDir);
+      await commitFile(hostDir, "hello.txt", "hello world", "initial");
+
+      const realProvider = testIsolated();
+      let closeCalls = 0;
+      const provider = createIsolatedSandboxProvider({
+        name: "failing-sync",
+        create: async (options) => {
+          const handle = await realProvider.create(options);
+          return {
+            ...handle,
+            copyIn: async (hostPath: string, sandboxPath: string) => {
+              if (sandboxPath.includes("repo.bundle")) {
+                throw new Error("transport closed");
+              }
+              await handle.copyIn(hostPath, sandboxPath);
+            },
+            close: async () => {
+              closeCalls += 1;
+              await handle.close();
+            },
+          };
+        },
+      });
+
+      await expect(
+        Effect.runPromise(
+          startSandbox({
+            provider,
+            hostRepoDir: hostDir,
+            env: {},
+          }),
+        ),
+      ).rejects.toThrow("Failed to copy bundle");
+      expect(closeCalls).toBe(1);
+    });
+
     it("copies copyPaths into the sandbox after sync", async () => {
       const hostDir = await mkdtemp(join(tmpdir(), "sandcastle-test-"));
       tempDirs.push(hostDir);

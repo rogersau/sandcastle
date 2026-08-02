@@ -671,6 +671,7 @@ describe("codex factory", () => {
     const provider = codex("gpt-5.4-mini");
     const { command, stdin } = provider.buildPrintCommand(opts("it's a test"));
     expect(command).not.toContain("it's a test");
+    expect(command.endsWith(" -")).toBe(true);
     expect(stdin).toBe("it's a test");
   });
 
@@ -748,7 +749,7 @@ describe("codex factory", () => {
   });
 
   it("supports all codex effort levels", () => {
-    for (const effort of ["low", "medium", "high", "xhigh"] as const) {
+    for (const effort of ["low", "medium", "high", "xhigh", "max"] as const) {
       const provider = codex("gpt-5.4-mini", { effort });
       expect(provider.buildPrintCommand(opts("test")).command).toContain(
         `model_reasoning_effort="${effort}"`,
