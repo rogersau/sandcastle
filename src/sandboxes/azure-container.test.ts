@@ -7,9 +7,20 @@ const azureMocks = vi.hoisted(() => {
     containers: [{ instanceView: { currentState: { state: "Running" } } }],
   });
   const deleteGroup = vi.fn().mockResolvedValue({});
-  const executeCommand = vi.fn().mockResolvedValue({
-    webSocketUri: "wss://example.test/exec",
-    password: "password",
+  let closeAfterCommand = true;
+  let activeSockets = 0;
+  let terminateCount = 0;
+  let stdinReadySignalSent = false;
+  let stdinSentBeforeReady = false;
+  const sentStdin: string[] = [];
+  const executeCommand = vi.fn().mockImplementation(async () => {
+    if (activeSockets > 0) {
+      throw new Error("previous ACI exec transport is still open");
+    }
+    return {
+      webSocketUri: "wss://example.test/exec",
+      password: "password",
+    };
   });
 
   class FakeWebSocket {
@@ -18,8 +29,11 @@ const azureMocks = vi.hoisted(() => {
       string,
       Array<(...args: any[]) => void>
     >();
+    private closed = false;
+    private awaitingStdin = false;
 
     constructor(_url: string) {
+      activeSockets++;
       queueMicrotask(() => this.emit("open"));
     }
 
@@ -47,16 +61,56 @@ const azureMocks = vi.hoisted(() => {
         );
         return;
       }
+      if (data.includes("__SANDCASTLE_OUTPUT_START__")) {
+        if (data.includes("__SANDCASTLE_STDIN_READY__")) {
+          this.awaitingStdin = true;
+          queueMicrotask(() => {
+            stdinReadySignalSent = true;
+            this.emit(
+              "message",
+              "\n__SANDCASTLE_OUTPUT_START__\n\n__SANDCASTLE_STDIN",
+            );
+            this.emit("message", "_READY__\n");
+          });
+          return;
+        }
+        queueMicrotask(() => this.complete());
+        return;
+      }
+      if (this.awaitingStdin) {
+        if (!stdinReadySignalSent) stdinSentBeforeReady = true;
+        sentStdin.push(data);
+        if (data === "\u0004") {
+          queueMicrotask(() => this.complete(false));
+        }
+        return;
+      }
       queueMicrotask(() => {
-        this.emit(
-          "message",
-          `\n__SANDCASTLE_OUTPUT_START__\nhello\n__SANDCASTLE_EXIT_CODE__0\n`,
-        );
-        this.emit("close");
+        this.complete();
       });
     }
 
     close(): void {
+      if (closeAfterCommand) this.finish();
+    }
+
+    terminate(): void {
+      terminateCount++;
+      this.finish();
+    }
+
+    private complete(includeOutputStart = true): void {
+      this.emit(
+        "message",
+        `${includeOutputStart ? "\n__SANDCASTLE_OUTPUT_START__\n" : ""}hello\n__SANDCASTLE_EXIT_CODE__0\n`,
+      );
+      if (closeAfterCommand) this.finish();
+    }
+
+    private finish(): void {
+      if (this.closed) return;
+      this.closed = true;
+      activeSockets--;
       this.emit("close");
     }
 
@@ -81,6 +135,20 @@ const azureMocks = vi.hoisted(() => {
     executeCommand,
     FakeClient,
     FakeWebSocket,
+    setCloseAfterCommand: (value: boolean) => {
+      closeAfterCommand = value;
+    },
+    resetConnectionState: () => {
+      closeAfterCommand = true;
+      activeSockets = 0;
+      terminateCount = 0;
+      stdinReadySignalSent = false;
+      stdinSentBeforeReady = false;
+      sentStdin.length = 0;
+    },
+    terminateCount: () => terminateCount,
+    sentStdin: () => [...sentStdin],
+    stdinSentBeforeReady: () => stdinSentBeforeReady,
   };
 });
 
@@ -169,5 +237,60 @@ describe("azureContainer()", () => {
 
     await handle.close();
     expect(azureMocks.deleteGroup).toHaveBeenCalledOnce();
+  });
+
+  it("terminates a marker-complete exec so the next ACI exec can start", async () => {
+    azureMocks.resetConnectionState();
+    azureMocks.setCloseAfterCommand(false);
+    try {
+      const provider = azureContainer({
+        subscriptionId: "subscription",
+        resourceGroup: "agents",
+        location: "australiaeast",
+        image: "agent:latest",
+      });
+      const handle = await provider.create({ env: {} });
+
+      await expect(handle.exec("printf hello")).resolves.toMatchObject({
+        stdout: "hello",
+        exitCode: 0,
+      });
+      await expect(handle.exec("printf hello again")).resolves.toMatchObject({
+        stdout: "hello",
+        exitCode: 0,
+      });
+      expect(azureMocks.terminateCount()).toBe(2);
+    } finally {
+      azureMocks.resetConnectionState();
+    }
+  });
+
+  it("waits for the ACI terminal to accept stdin before sending a prompt", async () => {
+    azureMocks.resetConnectionState();
+    try {
+      const provider = azureContainer({
+        subscriptionId: "subscription",
+        resourceGroup: "agents",
+        location: "australiaeast",
+        image: "agent:latest",
+      });
+      const handle = await provider.create({ env: {} });
+      const lines: string[] = [];
+
+      await expect(
+        handle.exec("cat", {
+          stdin: "implement issue 612",
+          onLine: (line) => lines.push(line),
+        }),
+      ).resolves.toMatchObject({ stdout: "hello", exitCode: 0 });
+
+      expect(azureMocks.stdinSentBeforeReady()).toBe(false);
+      expect(azureMocks.sentStdin()).toEqual(["implement issue 612", "\u0004"]);
+      expect(lines).toEqual(["hello"]);
+
+      await handle.close();
+    } finally {
+      azureMocks.resetConnectionState();
+    }
   });
 });

@@ -29,6 +29,8 @@ const SHELL_READY_MARKER = "__SANDCASTLE_SHELL_READY__";
 const SHELL_READY_SEQUENCE = `\n${SHELL_READY_MARKER}\n`;
 const OUTPUT_START_MARKER = "__SANDCASTLE_OUTPUT_START__";
 const OUTPUT_START_SEQUENCE = `\n${OUTPUT_START_MARKER}\n`;
+const STDIN_READY_MARKER = "__SANDCASTLE_STDIN_READY__";
+const STDIN_READY_SEQUENCE = `\n${STDIN_READY_MARKER}\n`;
 const EXIT_MARKER = "__SANDCASTLE_EXIT_CODE__";
 const EXIT_CODE_PATTERN = new RegExp(`\\n${EXIT_MARKER}(\\d+)\\n`);
 const INPUT_CHUNK_SIZE = 8 * 1024;
@@ -223,7 +225,9 @@ const extractExitCode = (
   }
 
   return {
-    stdout: normalized.slice(payloadStart, payloadStart + match.index),
+    stdout: normalized
+      .slice(payloadStart, payloadStart + match.index)
+      .replace(STDIN_READY_SEQUENCE, ""),
     exitCode: Number(match[1]),
   };
 };
@@ -235,12 +239,18 @@ const buildRemoteCommand = (
   hasStdin: boolean,
 ): string => {
   const effectiveCommand = sudo ? `sudo ${command}` : command;
+  const runCommand = hasStdin
+    ? `if [ "$code" -eq 0 ]; then printf '\\n${STDIN_READY_MARKER}\\n'; ${effectiveCommand}; code=$?; fi`
+    : `if [ "$code" -eq 0 ]; then ${effectiveCommand}; code=$?; fi`;
   const body = [
+    // The shell bootstrap is noncanonical so the command itself can be
+    // streamed reliably. Restore canonical mode before a command consumes
+    // stdin, then announce that boundary before the client sends Ctrl-D.
     ...(hasStdin ? ["stty icanon -echo"] : []),
     `printf '\\n${OUTPUT_START_MARKER}\\n'`,
     `cd ${shellQuote(cwd)}`,
     "code=$?",
-    `if [ "$code" -eq 0 ]; then ${effectiveCommand}; code=$?; fi`,
+    runCommand,
     `printf '\\n${EXIT_MARKER}%s\\n' "$code"`,
     'exit "$code"',
   ].join("\n");
@@ -473,16 +483,27 @@ export const azureContainer = (
           let pending = "";
           let readyPending = "";
           let shellReady = false;
+          let stdinReady = opts?.stdin === undefined;
           let outputStarted = false;
           let markerSeen = false;
           let settled = false;
           let resolveShellReady!: () => void;
           let rejectShellReady!: (error: Error) => void;
+          let resolveStdinReady!: () => void;
+          let rejectStdinReady!: (error: Error) => void;
           const shellReadyPromise = new Promise<void>((ready, failed) => {
             resolveShellReady = ready;
             rejectShellReady = failed;
           });
+          const stdinReadyPromise =
+            opts?.stdin === undefined
+              ? Promise.resolve()
+              : new Promise<void>((ready, failed) => {
+                  resolveStdinReady = ready;
+                  rejectStdinReady = failed;
+                });
           void shellReadyPromise.catch(() => undefined);
+          void stdinReadyPromise.catch(() => undefined);
 
           const emitLine = (line: string): void => {
             const normalized = line.replace(/\r$/, "");
@@ -519,6 +540,19 @@ export const azureContainer = (
               outputStarted = true;
             }
 
+            if (!stdinReady) {
+              const stdinReadyIndex = pending.indexOf(STDIN_READY_SEQUENCE);
+              if (stdinReadyIndex < 0) {
+                pending = pending.slice(-(STDIN_READY_SEQUENCE.length - 1));
+                return;
+              }
+              pending = pending.slice(
+                stdinReadyIndex + STDIN_READY_SEQUENCE.length,
+              );
+              stdinReady = true;
+              resolveStdinReady();
+            }
+
             const exitMatch = pending.match(EXIT_CODE_PATTERN);
             if (exitMatch?.index !== undefined) {
               if (opts?.onLine) {
@@ -530,6 +564,13 @@ export const azureContainer = (
               }
               pending = "";
               markerSeen = true;
+              // ACI can emit the completion marker without closing the exec
+              // WebSocket. The marker is our framed command boundary, so do
+              // not wait indefinitely for a transport-level close event. A
+              // graceful close can itself remain pending with ACI and block
+              // the next exec session, so destroy this client transport.
+              finish();
+              socket.terminate();
               return;
             }
 
@@ -556,6 +597,14 @@ export const azureContainer = (
                   ),
               );
             }
+            if (!stdinReady) {
+              rejectStdinReady(
+                error ??
+                  new Error(
+                    `Azure exec WebSocket closed before stdin was ready for command '${command}'.`,
+                  ),
+              );
+            }
             if (error) socket.close();
             if (error) reject(error);
             else resolve(chunks.join(""));
@@ -569,6 +618,7 @@ export const azureContainer = (
                 await shellReadyPromise;
                 await sendSocketChunks(socket, `${remoteScript}\n`);
                 if (opts?.stdin !== undefined) {
+                  await stdinReadyPromise;
                   await sendSocketInput(
                     socket,
                     opts.stdin,
