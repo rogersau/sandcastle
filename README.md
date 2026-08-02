@@ -149,7 +149,9 @@ the provider uses a `Never` restart policy and a default two-hour safety cap so
 an abandoned group terminates instead of running forever. Set
 `AZURE_SUBSCRIPTION_ID`, `AZURE_RESOURCE_GROUP`, `AZURE_LOCATION`, and
 `AZURE_CONTAINER_IMAGE` in the environment instead of passing those values in
-code when that is more convenient.
+code when that is more convenient. Exec sessions send a WebSocket keepalive
+ping every 30 seconds by default; `execKeepAliveIntervalMs` can tune that
+interval for networks with a shorter idle timeout.
 
 ## API
 

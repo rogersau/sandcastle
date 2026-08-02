@@ -35,6 +35,7 @@ const EXIT_MARKER = "__SANDCASTLE_EXIT_CODE__";
 const EXIT_CODE_PATTERN = new RegExp(`\\n${EXIT_MARKER}(\\d+)\\n`);
 const INPUT_CHUNK_SIZE = 8 * 1024;
 const CANONICAL_INPUT_CHUNK_SIZE = 2 * 1024;
+const EXEC_KEEPALIVE_INTERVAL_MS = 30_000;
 
 /** Credentials or managed identity used to pull a private image. */
 export interface AzureContainerRegistryOptions {
@@ -80,6 +81,8 @@ export interface AzureContainerOptions {
   readonly env?: Record<string, string>;
   /** Terminal size used for ACI exec sessions. */
   readonly terminalSize?: { readonly rows: number; readonly cols: number };
+  /** Interval between ACI exec WebSocket keepalive pings in milliseconds. */
+  readonly execKeepAliveIntervalMs?: number;
   /** Maximum retained streamed output per stream. Defaults to 64 KiB. */
   readonly maxOutputTailChars?: number;
   /** Maximum time to wait for the container to reach Running state. */
@@ -435,6 +438,16 @@ export const azureContainer = (
       }
 
       const terminalSize = options?.terminalSize ?? DEFAULT_TERMINAL_SIZE;
+      const execKeepAliveIntervalMs =
+        options?.execKeepAliveIntervalMs ?? EXEC_KEEPALIVE_INTERVAL_MS;
+      if (
+        !Number.isFinite(execKeepAliveIntervalMs) ||
+        execKeepAliveIntervalMs <= 0
+      ) {
+        throw new Error(
+          "execKeepAliveIntervalMs must be a positive finite number.",
+        );
+      }
       const maxOutputTailChars = options?.maxOutputTailChars ?? MAX_TAIL_CHARS;
 
       const exec = async (
@@ -491,6 +504,7 @@ export const azureContainer = (
           let rejectShellReady!: (error: Error) => void;
           let resolveStdinReady!: () => void;
           let rejectStdinReady!: (error: Error) => void;
+          let keepAliveTimer: ReturnType<typeof setInterval> | undefined;
           const shellReadyPromise = new Promise<void>((ready, failed) => {
             resolveShellReady = ready;
             rejectShellReady = failed;
@@ -589,6 +603,10 @@ export const azureContainer = (
           const finish = (error?: Error): void => {
             if (settled) return;
             settled = true;
+            if (keepAliveTimer !== undefined) {
+              clearInterval(keepAliveTimer);
+              keepAliveTimer = undefined;
+            }
             if (!shellReady) {
               rejectShellReady(
                 error ??
@@ -609,6 +627,19 @@ export const azureContainer = (
             if (error) reject(error);
             else resolve(chunks.join(""));
           };
+
+          // ACI's exec endpoint can close an otherwise healthy WebSocket
+          // after several minutes without terminal output. Protocol-level
+          // pings keep long-running, quiet commands (for example a TypeScript
+          // compile) alive without writing input to the command's PTY.
+          keepAliveTimer = setInterval(() => {
+            if (settled || socket.readyState !== WebSocket.OPEN) return;
+            try {
+              socket.ping();
+            } catch (error) {
+              finish(error instanceof Error ? error : new Error(String(error)));
+            }
+          }, execKeepAliveIntervalMs);
 
           socket.once("open", () => {
             void (async () => {

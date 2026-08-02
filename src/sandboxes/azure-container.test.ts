@@ -16,6 +16,9 @@ const azureMocks = vi.hoisted(() => {
   let stdinReadySignalSent = false;
   let stdinSentBeforeReady = false;
   let commandOutput = "hello";
+  let holdCommand = false;
+  let pendingCommandCompletion: (() => void) | undefined;
+  let pingCount = 0;
   const commandScripts: string[] = [];
   const sentStdin: string[] = [];
   const executeCommand = vi.fn().mockImplementation(async () => {
@@ -36,6 +39,7 @@ const azureMocks = vi.hoisted(() => {
     >();
     private closed = false;
     private awaitingStdin = false;
+    readyState = 1;
 
     constructor(_url: string) {
       activeSockets++;
@@ -80,7 +84,11 @@ const azureMocks = vi.hoisted(() => {
           });
           return;
         }
-        queueMicrotask(() => this.complete());
+        if (holdCommand) {
+          pendingCommandCompletion = () => this.complete();
+        } else {
+          queueMicrotask(() => this.complete());
+        }
         return;
       }
       if (this.awaitingStdin) {
@@ -105,6 +113,10 @@ const azureMocks = vi.hoisted(() => {
       this.finish();
     }
 
+    ping(): void {
+      pingCount++;
+    }
+
     private complete(includeOutputStart = true): void {
       this.emit(
         "message",
@@ -116,6 +128,7 @@ const azureMocks = vi.hoisted(() => {
     private finish(): void {
       if (this.closed) return;
       this.closed = true;
+      this.readyState = 3;
       activeSockets--;
       this.emit("close");
     }
@@ -151,6 +164,9 @@ const azureMocks = vi.hoisted(() => {
       stdinReadySignalSent = false;
       stdinSentBeforeReady = false;
       commandOutput = "hello";
+      holdCommand = false;
+      pendingCommandCompletion = undefined;
+      pingCount = 0;
       commandScripts.length = 0;
       sentStdin.length = 0;
     },
@@ -161,6 +177,15 @@ const azureMocks = vi.hoisted(() => {
     setCommandOutput: (value: string) => {
       commandOutput = value;
     },
+    setHoldCommand: (value: boolean) => {
+      holdCommand = value;
+    },
+    completeCommand: () => {
+      const complete = pendingCommandCompletion;
+      pendingCommandCompletion = undefined;
+      complete?.();
+    },
+    pingCount: () => pingCount,
   };
 });
 
@@ -272,6 +297,34 @@ describe("azureContainer()", () => {
         exitCode: 0,
       });
       expect(azureMocks.terminateCount()).toBe(2);
+    } finally {
+      azureMocks.resetConnectionState();
+    }
+  });
+
+  it("keeps a quiet long-running exec alive with WebSocket pings", async () => {
+    azureMocks.resetConnectionState();
+    azureMocks.setHoldCommand(true);
+    try {
+      const provider = azureContainer({
+        subscriptionId: "subscription",
+        resourceGroup: "agents",
+        location: "australiaeast",
+        image: "agent:latest",
+        execKeepAliveIntervalMs: 5,
+      });
+      const handle = await provider.create({ env: {} });
+      const resultPromise = handle.exec("sleep 35");
+
+      await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      expect(azureMocks.pingCount()).toBeGreaterThan(0);
+
+      azureMocks.completeCommand();
+      await expect(resultPromise).resolves.toMatchObject({
+        stdout: "hello",
+        exitCode: 0,
+      });
+      await handle.close();
     } finally {
       azureMocks.resetConnectionState();
     }
