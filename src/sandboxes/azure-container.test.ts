@@ -1,3 +1,6 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { azureContainer } from "./azure-container.js";
 
@@ -12,6 +15,8 @@ const azureMocks = vi.hoisted(() => {
   let terminateCount = 0;
   let stdinReadySignalSent = false;
   let stdinSentBeforeReady = false;
+  let commandOutput = "hello";
+  const commandScripts: string[] = [];
   const sentStdin: string[] = [];
   const executeCommand = vi.fn().mockImplementation(async () => {
     if (activeSockets > 0) {
@@ -62,6 +67,7 @@ const azureMocks = vi.hoisted(() => {
         return;
       }
       if (data.includes("__SANDCASTLE_OUTPUT_START__")) {
+        commandScripts.push(data);
         if (data.includes("__SANDCASTLE_STDIN_READY__")) {
           this.awaitingStdin = true;
           queueMicrotask(() => {
@@ -102,7 +108,7 @@ const azureMocks = vi.hoisted(() => {
     private complete(includeOutputStart = true): void {
       this.emit(
         "message",
-        `${includeOutputStart ? "\n__SANDCASTLE_OUTPUT_START__\n" : ""}hello\n__SANDCASTLE_EXIT_CODE__0\n`,
+        `${includeOutputStart ? "\n__SANDCASTLE_OUTPUT_START__\n" : ""}${commandOutput}\n__SANDCASTLE_EXIT_CODE__0\n`,
       );
       if (closeAfterCommand) this.finish();
     }
@@ -144,11 +150,17 @@ const azureMocks = vi.hoisted(() => {
       terminateCount = 0;
       stdinReadySignalSent = false;
       stdinSentBeforeReady = false;
+      commandOutput = "hello";
+      commandScripts.length = 0;
       sentStdin.length = 0;
     },
     terminateCount: () => terminateCount,
     sentStdin: () => [...sentStdin],
     stdinSentBeforeReady: () => stdinSentBeforeReady,
+    commandScripts: () => [...commandScripts],
+    setCommandOutput: (value: string) => {
+      commandOutput = value;
+    },
   };
 });
 
@@ -290,6 +302,39 @@ describe("azureContainer()", () => {
 
       await handle.close();
     } finally {
+      azureMocks.resetConnectionState();
+    }
+  });
+
+  it("copies wrapped base64 output without filtering its alphabet", async () => {
+    azureMocks.resetConnectionState();
+    const outputDirectory = await mkdtemp(join(tmpdir(), "azure-copy-out-"));
+    const outputPath = join(outputDirectory, "payload.bin");
+    const expected = Buffer.from("payload with r and n characters\n", "utf8");
+    try {
+      const provider = azureContainer({
+        subscriptionId: "subscription",
+        resourceGroup: "agents",
+        location: "australiaeast",
+        image: "agent:latest",
+      });
+      const handle = await provider.create({ env: {} });
+      azureMocks.setCommandOutput(
+        expected.toString("base64").replace(/.{12}/g, "$&\n"),
+      );
+
+      await handle.copyFileOut("/home/agent/payload.bin", outputPath);
+
+      expect(await readFile(outputPath)).toEqual(expected);
+      const copyCommand = azureMocks
+        .commandScripts()
+        .find((script) => script.includes("base64 '/home/agent/payload.bin'"));
+      expect(copyCommand).toContain("base64 '/home/agent/payload.bin'");
+      expect(copyCommand).not.toContain("tr -d");
+
+      await handle.close();
+    } finally {
+      await rm(outputDirectory, { recursive: true, force: true });
       azureMocks.resetConnectionState();
     }
   });

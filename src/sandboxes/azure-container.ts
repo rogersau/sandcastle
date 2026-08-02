@@ -705,19 +705,16 @@ export const azureContainer = (
           sandboxPath: string,
           hostPath: string,
         ): Promise<void> => {
-          const result = await exec(
-            `base64 ${shellQuote(sandboxPath)} | tr -d '\\r\\n'`,
-          );
+          const result = await exec(`base64 ${shellQuote(sandboxPath)}`);
           if (result.exitCode !== 0) {
             throw new Error(
               `Failed to copy '${sandboxPath}' out of Azure container: ${result.stdout}`,
             );
           }
           await mkdir(dirname(hostPath), { recursive: true });
-          await writeFile(
-            hostPath,
-            Buffer.from(result.stdout.trim(), "base64"),
-          );
+          // Buffer's base64 decoder accepts the wrapped whitespace emitted by
+          // base64, so preserve it instead of filtering terminal output.
+          await writeFile(hostPath, Buffer.from(result.stdout, "base64"));
         },
 
         close: async (): Promise<void> => {
