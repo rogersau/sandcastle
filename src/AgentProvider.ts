@@ -749,6 +749,21 @@ const parseCodexStreamLine = (line: string): ParsedStreamEvent[] => {
 /** Options for the codex agent provider. */
 export interface CodexOptions {
   readonly effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /**
+   * Codex's own filesystem sandbox mode. When set, Sandcastle uses explicit
+   * Codex sandbox and approval flags instead of the unrestricted bypass flag.
+   *
+   * `read-only` is intended for planning and review agents that may inspect the
+   * repository but must not modify it. The Sandcastle sandbox remains the outer
+   * isolation boundary in every mode.
+   */
+  readonly sandboxMode?: "read-only" | "workspace-write" | "danger-full-access";
+  /**
+   * Approval policy used with `sandboxMode`. Defaults to `never` when an
+   * explicit sandbox mode is configured. Setting this without `sandboxMode`
+   * uses Codex's `danger-full-access` sandbox to preserve historical behavior.
+   */
+  readonly approvalPolicy?: "never" | "on-request";
   /** Environment variables injected by this agent provider. */
   readonly env?: Record<string, string>;
   /** When false, session capture is disabled. Default: true. */
@@ -791,10 +806,19 @@ export const codex = (
     // dropped in favour of `-a on-request`. `-s danger-full-access` disables
     // Codex's own filesystem sandbox — Sandcastle owns that boundary, and
     // here the reviewer agent owns the per-action approval boundary.
-    const approvalsFlags =
-      options?.approvalsReviewer === "auto_review"
-        ? ` -a on-request -s danger-full-access -c ${shellEscape(`approvals_reviewer="auto_review"`)}`
-        : " --dangerously-bypass-approvals-and-sandbox";
+    let approvalsFlags: string;
+    if (
+      options?.sandboxMode !== undefined ||
+      options?.approvalPolicy !== undefined
+    ) {
+      const sandboxMode = options.sandboxMode ?? "danger-full-access";
+      const approvalPolicy = options.approvalPolicy ?? "never";
+      approvalsFlags = ` -a ${approvalPolicy} -s ${sandboxMode}`;
+    } else if (options?.approvalsReviewer === "auto_review") {
+      approvalsFlags = ` -a on-request -s danger-full-access -c ${shellEscape(`approvals_reviewer="auto_review"`)}`;
+    } else {
+      approvalsFlags = " --dangerously-bypass-approvals-and-sandbox";
+    }
     // Codex distinguishes fork from resume at the verb level — `codex exec
     // fork <id>` leaves the parent rollout intact; `codex exec resume <id>`
     // appends to it. See ADR 0018.
