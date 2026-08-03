@@ -1,8 +1,8 @@
 # HAFBOT Adaptive Multi-Agent Routing Design
 
-**Status:** Implemented in the local Sandcastle and HAFBOT workspaces; rollout pending  
-**Date:** 2026-08-03  
-**Target workflow:** `rogersau/hafbot` ready-for-agent issue processing  
+**Status:** Implemented in the local Sandcastle and HAFBOT workspaces; rollout pending
+**Date:** 2026-08-03
+**Target workflow:** `rogersau/hafbot` ready-for-agent issue processing
 **Target runtime:** `hp-hafbot` self-hosted runner → Azure Container Instances
 
 ## Executive recommendation
