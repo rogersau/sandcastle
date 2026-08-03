@@ -794,6 +794,37 @@ describe("codex factory", () => {
     expect(command).toContain("--dangerously-bypass-approvals-and-sandbox");
   });
 
+  it("buildPrintCommand uses an explicit read-only sandbox with no approvals", () => {
+    const provider = codex("gpt-5.4-mini", {
+      sandboxMode: "read-only",
+    });
+    const { command } = provider.buildPrintCommand(opts("test"));
+    expect(command).toContain("-a never");
+    expect(command).toContain("-s read-only");
+    expect(command).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+
+  it("buildPrintCommand supports workspace-write with on-request approvals", () => {
+    const provider = codex("gpt-5.4-mini", {
+      sandboxMode: "workspace-write",
+      approvalPolicy: "on-request",
+    });
+    const { command } = provider.buildPrintCommand(opts("test"));
+    expect(command).toContain("-a on-request");
+    expect(command).toContain("-s workspace-write");
+    expect(command).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+  });
+
+  it("explicit sandbox policy takes precedence over approvalsReviewer", () => {
+    const provider = codex("gpt-5.4-mini", {
+      approvalsReviewer: "auto_review",
+      sandboxMode: "read-only",
+    });
+    const { command } = provider.buildPrintCommand(opts("test"));
+    expect(command).toContain("-s read-only");
+    expect(command).not.toContain("approvals_reviewer");
+  });
+
   it("buildPrintCommand omits approvals_reviewer config when approvalsReviewer is unset", () => {
     const provider = codex("gpt-5.4-mini");
     const { command } = provider.buildPrintCommand(opts("test"));
