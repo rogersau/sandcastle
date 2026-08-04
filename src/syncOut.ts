@@ -249,7 +249,7 @@ export const syncOut = (
     const hasCommits = base !== sandboxHead;
 
     // Check for uncommitted changes
-    const diffResult = yield* execSandbox(handle, "git diff HEAD", {
+    const diffResult = yield* execSandbox(handle, "git diff --no-color HEAD", {
       cwd: worktreePath,
     });
     const hasDiff =
