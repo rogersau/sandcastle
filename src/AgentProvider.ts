@@ -806,6 +806,7 @@ export const codex = (
     // dropped in favour of `-a on-request`. `-s danger-full-access` disables
     // Codex's own filesystem sandbox — Sandcastle owns that boundary, and
     // here the reviewer agent owns the per-action approval boundary.
+    let approvalPrefix = "";
     let approvalsFlags: string;
     if (
       options?.sandboxMode !== undefined ||
@@ -813,9 +814,11 @@ export const codex = (
     ) {
       const sandboxMode = options.sandboxMode ?? "danger-full-access";
       const approvalPolicy = options.approvalPolicy ?? "never";
-      approvalsFlags = ` -a ${approvalPolicy} -s ${sandboxMode}`;
+      approvalPrefix = ` -a ${approvalPolicy}`;
+      approvalsFlags = ` -s ${sandboxMode}`;
     } else if (options?.approvalsReviewer === "auto_review") {
-      approvalsFlags = ` -a on-request -s danger-full-access -c ${shellEscape(`approvals_reviewer="auto_review"`)}`;
+      approvalPrefix = " -a on-request";
+      approvalsFlags = ` -s danger-full-access -c ${shellEscape(`approvals_reviewer="auto_review"`)}`;
     } else {
       approvalsFlags = " --dangerously-bypass-approvals-and-sandbox";
     }
@@ -824,11 +827,11 @@ export const codex = (
     // appends to it. See ADR 0018.
     let base: string;
     if (resumeSession && forkSession) {
-      base = `codex exec fork ${shellEscape(resumeSession)}`;
+      base = `codex${approvalPrefix} exec fork ${shellEscape(resumeSession)}`;
     } else if (resumeSession) {
-      base = `codex exec resume ${shellEscape(resumeSession)}`;
+      base = `codex${approvalPrefix} exec resume ${shellEscape(resumeSession)}`;
     } else {
-      base = "codex exec";
+      base = `codex${approvalPrefix} exec`;
     }
     // Codex requires `-` to be explicit when the fresh-session prompt is
     // supplied on stdin; without it, `codex exec` reports "No prompt

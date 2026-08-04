@@ -804,6 +804,15 @@ describe("codex factory", () => {
     expect(command).not.toContain("--dangerously-bypass-approvals-and-sandbox");
   });
 
+  it("places the global approval policy before the exec subcommand", () => {
+    const provider = codex("gpt-5.4-mini", {
+      sandboxMode: "workspace-write",
+    });
+    const { command } = provider.buildPrintCommand(opts("test"));
+    expect(command).toMatch(/^codex -a never exec\b/);
+    expect(command).not.toMatch(/\bexec\b.*\s-a\s/);
+  });
+
   it("buildPrintCommand supports workspace-write with on-request approvals", () => {
     const provider = codex("gpt-5.4-mini", {
       sandboxMode: "workspace-write",
