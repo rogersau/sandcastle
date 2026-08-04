@@ -350,7 +350,11 @@ describe("azureContainer()", () => {
       ).resolves.toMatchObject({ stdout: "hello", exitCode: 0 });
 
       expect(azureMocks.stdinSentBeforeReady()).toBe(false);
-      expect(azureMocks.sentStdin()).toEqual(["implement issue 612", "\u0004"]);
+      expect(azureMocks.sentStdin()).toEqual([
+        "implement issue 612",
+        "\u0004",
+        "\u0004",
+      ]);
       expect(lines).toEqual(["hello"]);
 
       await handle.close();

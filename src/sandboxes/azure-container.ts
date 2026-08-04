@@ -207,9 +207,11 @@ const sendSocketInput = async (
     await sendSocketText(socket, lineBreaks ? `${chunk}\n` : chunk);
   }
 
-  // ACI exposes a terminal rather than a half-close operation. Ctrl-D is the
-  // terminal equivalent of closing stdin for commands such as base64 and tar.
+  // ACI exposes a canonical terminal rather than a half-close operation. When
+  // buffered input does not end in a newline, the first Ctrl-D only makes that
+  // buffer readable; a second Ctrl-D at the empty line produces EOF.
   await sendSocketText(socket, "\u0004");
+  if (!lineBreaks && input.length > 0) await sendSocketText(socket, "\u0004");
 };
 
 const extractExitCode = (
