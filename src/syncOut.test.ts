@@ -205,6 +205,31 @@ describe("syncOut", () => {
     }
   });
 
+  it("extracts uncommitted changes when Git color output is forced", async () => {
+    const hostDir = await mkdtemp(join(tmpdir(), "host-"));
+    await initRepo(hostDir);
+    await commitFile(hostDir, "initial.txt", "initial", "initial commit");
+
+    const provider = testIsolated();
+    const handle = await provider.create({ env: {} });
+    try {
+      await Effect.runPromise(syncIn(hostDir, handle));
+
+      const wp = handle.worktreePath;
+      await handle.exec("git config color.ui always", { cwd: wp });
+      await handle.exec('echo "modified with color forced" > initial.txt', {
+        cwd: wp,
+      });
+
+      await Effect.runPromise(syncOut(hostDir, handle));
+
+      const content = await readFile(join(hostDir, "initial.txt"), "utf-8");
+      expect(content.trim()).toBe("modified with color forced");
+    } finally {
+      await handle.close();
+    }
+  });
+
   it("extracts untracked files from sandbox to host", async () => {
     const hostDir = await mkdtemp(join(tmpdir(), "host-"));
     await initRepo(hostDir);
